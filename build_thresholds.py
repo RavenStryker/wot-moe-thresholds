@@ -113,6 +113,10 @@ def main():
         result["vehicles"] = fetch_vehicles(REALMS["na"])
         print(f"metadata: {len(result['vehicles'])} vehicles", file=sys.stderr)
 
+    # Create the parent directory if it doesn't exist (e.g. public/ in CI).
+    # abspath() handles a bare filename, where dirname() would return "".
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, separators=(",", ":"),
                   indent=args.indent)
