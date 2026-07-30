@@ -24,6 +24,8 @@ Output shape:
 """
 
 import argparse
+import datetime
+import re
 import json
 import os
 import sys
@@ -129,25 +131,46 @@ def decode_series(arr):
     return out
 
 
-def update_history(path, date, distribution, keep_days):
-    """Append today's snapshot to a rolling per-realm history file."""
+def update_history(path, date, updated_at, distribution, keep_days):
+    """Append a snapshot to a rolling per-realm history file.
+
+    Entries are keyed by FETCH DATE (the UTC date this job ran), not by WG's
+    `updated_at`.
+
+    Why: `updated_at` does not track when the values change. It sits ~2 days
+    behind and stays frozen for long stretches while the numbers themselves
+    move daily — verified by comparing this endpoint against poliroid.me, whose
+    newest daily entry matches WG's current values exactly (21/21 across 7
+    tanks x 3 percentiles) while its `updated_at`-dated entry does not. The
+    field appears to report the battle-data cutoff, not the computation time.
+    Keying by it would collapse every run into one perpetually-overwritten row.
+
+    `updated_at` is still recorded per entry, parallel to `dates`, so the mod
+    can show the underlying data cutoff if useful.
+
+    Re-running on the same UTC date replaces that entry rather than appending.
+    """
     try:
         with open(path, encoding="utf-8") as f:
             hist = json.load(f)
         dates = hist["dates"]
+        stamps = hist.get("updated_at", [None] * len(dates))
         series = {t: {p: decode_series(a) for p, a in m.items()}
                   for t, m in hist["thresholds"].items()}
     except (FileNotFoundError, KeyError, json.JSONDecodeError):
-        dates, series = [], {}
+        dates, stamps, series = [], [], {}
 
     if dates and dates[-1] == date:
-        # Re-run on the same day: replace rather than duplicate.
+        # Same UTC day: drop the previous entry, re-append below.
         dates.pop()
+        stamps.pop()
         for m in series.values():
             for a in m.values():
-                a.pop()
+                if a:
+                    a.pop()
 
     dates.append(date)
+    stamps.append(updated_at)
     n = len(dates)
 
     for tid, marks in distribution.items():
@@ -157,22 +180,26 @@ def update_history(path, date, distribution, keep_days):
             arr.extend([None] * (n - 1 - len(arr)))   # backfill new tanks
             arr.append(marks.get(p))
 
-    # Tanks absent today get an explicit gap.
-    for tid, rec in series.items():
-        if tid not in distribution:
-            for p in PERCENTILES.split(","):
-                arr = rec.setdefault(p, [])
-                arr.extend([None] * (n - len(arr)))
+    # Pad every series to full length (covers tanks absent from this run).
+    for rec in series.values():
+        for p in PERCENTILES.split(","):
+            arr = rec.setdefault(p, [])
+            arr.extend([None] * (n - len(arr)))
 
-    # Trim to the rolling window.
-    if n > keep_days:
-        cut = n - keep_days
-        dates = dates[cut:]
+    # Trim to the rolling window, by date span rather than entry count so a
+    # missed run doesn't silently extend how far back the window reaches.
+    newest = datetime.datetime.strptime(dates[-1], "%Y-%m-%d")
+    cutoff = newest - datetime.timedelta(days=keep_days - 1)
+    keep = [i for i, d in enumerate(dates)
+            if datetime.datetime.strptime(d, "%Y-%m-%d") >= cutoff]
+    if len(keep) != n:
+        dates = [dates[i] for i in keep]
+        stamps = [stamps[i] for i in keep]
         for rec in series.values():
             for p in rec:
-                rec[p] = rec[p][cut:]
+                rec[p] = [rec[p][i] for i in keep]
 
-    # Drop tanks with no data left anywhere in the window.
+    # Drop tanks with no data anywhere in the window.
     series = {t: m for t, m in series.items()
               if any(v is not None for a in m.values() for v in a)}
 
@@ -180,6 +207,7 @@ def update_history(path, date, distribution, keep_days):
         "encoding": "delta",
         "generated_at": int(time.time()),
         "dates": dates,
+        "updated_at": stamps,
         "thresholds": {t: {p: encode_series(a) for p, a in m.items()}
                        for t, m in series.items()},
     }
@@ -187,6 +215,33 @@ def update_history(path, date, distribution, keep_days):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
     return len(dates), len(series)
+
+
+def write_snapshot(snapshot_dir, date, payload, keep_days):
+    """Write a dated snapshot and prune ones outside the rolling window.
+
+    Filenames use ISO 8601 (thresholds_YYYY-MM-DD.json) so they sort
+    chronologically in directory listings and lexicographic comparisons.
+
+    These are a human-readable archive; the mod should read the consolidated
+    history_{realm}.json instead (one request instead of thirty).
+    """
+    os.makedirs(snapshot_dir, exist_ok=True)
+    path = os.path.join(snapshot_dir, f"thresholds_{date}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+
+    cutoff = (datetime.datetime.strptime(date, "%Y-%m-%d")
+              - datetime.timedelta(days=keep_days - 1))
+    pruned = []
+    for name in sorted(os.listdir(snapshot_dir)):
+        m = re.fullmatch(r"thresholds_(\d{4}-\d{2}-\d{2})\.json", name)
+        if not m:
+            continue
+        if datetime.datetime.strptime(m.group(1), "%Y-%m-%d") < cutoff:
+            os.remove(os.path.join(snapshot_dir, name))
+            pruned.append(name)
+    return path, pruned
 
 
 def main():
@@ -199,7 +254,9 @@ def main():
     ap.add_argument("--history-dir", default=None,
                     help="if set, maintain rolling per-realm history files here")
     ap.add_argument("--history-days", type=int, default=30,
-                    help="rolling window length (default 30)")
+                    help="rolling window length in days (default 30)")
+    ap.add_argument("--snapshot-dir", default=None,
+                    help="also write dated thresholds_YYYY-MM-DD.json archives here")
     args = ap.parse_args()
 
     today = time.strftime("%Y-%m-%d", time.gmtime())
@@ -212,7 +269,8 @@ def main():
 
         if args.history_dir:
             path = os.path.join(args.history_dir, f"history_{realm}.json")
-            days, tanks = update_history(path, today, dist, args.history_days)
+            days, tanks = update_history(
+                path, today, updated, dist, args.history_days)
             print(f"{realm}: history {days} day(s), {tanks} vehicles -> {path}",
                   file=sys.stderr)
 
@@ -228,6 +286,15 @@ def main():
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, separators=(",", ":"),
                   indent=args.indent)
+
+    if args.snapshot_dir:
+        path, pruned = write_snapshot(args.snapshot_dir, today, result,
+                                      args.history_days)
+        print(f"snapshot -> {path}", file=sys.stderr)
+        if pruned:
+            print(f"pruned {len(pruned)} snapshot(s) outside the "
+                  f"{args.history_days}-day window: {pruned[0]} .. {pruned[-1]}",
+                  file=sys.stderr)
 
     size = os.path.getsize(args.out)
     print(f"wrote {args.out} ({size/1024:.1f} KB)", file=sys.stderr)
