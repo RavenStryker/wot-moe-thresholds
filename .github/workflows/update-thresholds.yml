@@ -3,11 +3,13 @@ name: Update MoE thresholds
 on:
   schedule:
     # 00:15 UTC daily. WG recomputes at 00:00 UTC; this leaves a 15 min buffer.
+    # NOTE: GitHub delays scheduled runs under load — actual start is often
+    # 5-30 min later. Harmless here, the data only changes once a day.
     - cron: '15 0 * * *'
-  workflow_dispatch:
+  workflow_dispatch:        # lets you trigger a run manually from the Actions tab
 
 permissions:
-  contents: write
+  contents: write           # required to commit the refreshed file
 
 concurrency:
   group: update-thresholds
@@ -29,7 +31,11 @@ jobs:
         env:
           WG_APPLICATION_ID: ${{ secrets.WG_APPLICATION_ID }}
         run: |
-          python build_thresholds.py --no-metadata --out public/thresholds.json
+          python build_thresholds.py \
+            --no-metadata \
+            --out public/thresholds.json \
+            --history-dir public/history \
+            --history-days 30
 
       - name: Sanity check output
         run: |
@@ -39,6 +45,7 @@ jobs:
           for realm, block in d["realms"].items():
               n = len(block["thresholds"])
               print(f"{realm}: {n} vehicles, updated_at={block['updated_at']}")
+              # Guard against a partial or empty response being published.
               if n < 500:
                   sys.exit(f"FAIL: {realm} returned only {n} vehicles")
               t34 = block["thresholds"].get("1")
@@ -47,15 +54,15 @@ jobs:
           print("sanity check passed")
           EOF
 
-      - name: Commit if changed
+      - name: Commit history
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public/thresholds.json
+          git add public/history
           if git diff --staged --quiet; then
             echo "No change — nothing to commit."
           else
-            git commit -m "Update MoE thresholds ($(date -u +%Y-%m-%d))"
+            git commit -m "Update MoE history ($(date -u +%Y-%m-%d))"
             git push
           fi
 
