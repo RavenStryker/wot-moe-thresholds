@@ -92,6 +92,103 @@ def fetch_vehicles(host, language="en"):
     return out
 
 
+def encode_series(vals):
+    """Delta-encode. First value absolute; subsequent values are diffs.
+
+    None marks a missing day (a failed run, or a tank that didn't exist yet).
+    After a None the chain restarts, so the next present value is absolute
+    again. Decoder must mirror this.
+    """
+    out, prev = [], None
+    for v in vals:
+        if v is None:
+            out.append(None)
+            prev = None
+        elif prev is None:
+            out.append(v)
+            prev = v
+        else:
+            out.append(v - prev)
+            prev = v
+    return out
+
+
+def decode_series(arr):
+    """Inverse of encode_series. Mirror this in the mod."""
+    out, prev = [], None
+    for x in arr:
+        if x is None:
+            out.append(None)
+            prev = None
+        elif prev is None:
+            out.append(x)
+            prev = x
+        else:
+            prev += x
+            out.append(prev)
+    return out
+
+
+def update_history(path, date, distribution, keep_days):
+    """Append today's snapshot to a rolling per-realm history file."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            hist = json.load(f)
+        dates = hist["dates"]
+        series = {t: {p: decode_series(a) for p, a in m.items()}
+                  for t, m in hist["thresholds"].items()}
+    except (FileNotFoundError, KeyError, json.JSONDecodeError):
+        dates, series = [], {}
+
+    if dates and dates[-1] == date:
+        # Re-run on the same day: replace rather than duplicate.
+        dates.pop()
+        for m in series.values():
+            for a in m.values():
+                a.pop()
+
+    dates.append(date)
+    n = len(dates)
+
+    for tid, marks in distribution.items():
+        rec = series.setdefault(tid, {})
+        for p in PERCENTILES.split(","):
+            arr = rec.setdefault(p, [])
+            arr.extend([None] * (n - 1 - len(arr)))   # backfill new tanks
+            arr.append(marks.get(p))
+
+    # Tanks absent today get an explicit gap.
+    for tid, rec in series.items():
+        if tid not in distribution:
+            for p in PERCENTILES.split(","):
+                arr = rec.setdefault(p, [])
+                arr.extend([None] * (n - len(arr)))
+
+    # Trim to the rolling window.
+    if n > keep_days:
+        cut = n - keep_days
+        dates = dates[cut:]
+        for rec in series.values():
+            for p in rec:
+                rec[p] = rec[p][cut:]
+
+    # Drop tanks with no data left anywhere in the window.
+    series = {t: m for t, m in series.items()
+              if any(v is not None for a in m.values() for v in a)}
+
+    out = {
+        "encoding": "delta",
+        "generated_at": int(time.time()),
+        "dates": dates,
+        "thresholds": {t: {p: encode_series(a) for p, a in m.items()}
+                       for t, m in series.items()},
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
+    return len(dates), len(series)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="thresholds.json")
@@ -99,14 +196,25 @@ def main():
                     help="pretty-print (default: compact, smaller payload)")
     ap.add_argument("--no-metadata", action="store_true",
                     help="omit vehicle metadata (the mod has it client-side)")
+    ap.add_argument("--history-dir", default=None,
+                    help="if set, maintain rolling per-realm history files here")
+    ap.add_argument("--history-days", type=int, default=30,
+                    help="rolling window length (default 30)")
     args = ap.parse_args()
 
+    today = time.strftime("%Y-%m-%d", time.gmtime())
     result = {"generated_at": int(time.time()), "realms": {}}
 
     for realm, host in REALMS.items():
         dist, updated = fetch_thresholds(host)
         result["realms"][realm] = {"updated_at": updated, "thresholds": dist}
         print(f"{realm}: {len(dist)} vehicles, updated_at={updated}", file=sys.stderr)
+
+        if args.history_dir:
+            path = os.path.join(args.history_dir, f"history_{realm}.json")
+            days, tanks = update_history(path, today, dist, args.history_days)
+            print(f"{realm}: history {days} day(s), {tanks} vehicles -> {path}",
+                  file=sys.stderr)
 
     if not args.no_metadata:
         # Metadata is realm-independent for our purposes; pull once.
