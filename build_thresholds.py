@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
-Daily build job: fetch MoE thresholds from the Wargaming API and emit a single
-static JSON file for the WoT mod to consume.
+Daily build job: fetch MoE thresholds from the Wargaming API and emit a single static JSON file for the WoT mod to consume.
 
-Reads WG_APPLICATION_ID from the environment. Never hardcode the key — this
-script is meant to run in CI (GitHub Actions secret, etc.) and the key must not
-ship inside the mod.
+Reads WG_APPLICATION_ID from the environment. Never hardcode the key — this script is meant to run in CI (GitHub Actions secret, etc.) and the key must not ship inside the mod.
 
 Usage:
     export WG_APPLICATION_ID=...
@@ -100,6 +97,8 @@ def main():
     ap.add_argument("--out", default="thresholds.json")
     ap.add_argument("--indent", type=int, default=None,
                     help="pretty-print (default: compact, smaller payload)")
+    ap.add_argument("--no-metadata", action="store_true",
+                    help="omit vehicle metadata (the mod has it client-side)")
     args = ap.parse_args()
 
     result = {"generated_at": int(time.time()), "realms": {}}
@@ -109,9 +108,10 @@ def main():
         result["realms"][realm] = {"updated_at": updated, "thresholds": dist}
         print(f"{realm}: {len(dist)} vehicles, updated_at={updated}", file=sys.stderr)
 
-    # Metadata is realm-independent for our purposes; pull once.
-    result["vehicles"] = fetch_vehicles(REALMS["na"])
-    print(f"metadata: {len(result['vehicles'])} vehicles", file=sys.stderr)
+    if not args.no_metadata:
+        # Metadata is realm-independent for our purposes; pull once.
+        result["vehicles"] = fetch_vehicles(REALMS["na"])
+        print(f"metadata: {len(result['vehicles'])} vehicles", file=sys.stderr)
 
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, separators=(",", ":"),
