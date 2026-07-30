@@ -35,6 +35,7 @@ jobs:
             --no-metadata \
             --out public/thresholds.json \
             --history-dir public/history \
+            --snapshot-dir public/snapshots \
             --history-days 30
 
       - name: Sanity check output
@@ -54,11 +55,23 @@ jobs:
           print("sanity check passed")
           EOF
 
+      # The rolling history must persist between runs, so it lives in the repo.
+      # Pages artifacts don't survive to the next run.
+      #
+      # This commit doubles as the keepalive: GitHub disables scheduled
+      # workflows after 60 days with no commits on the default branch (which
+      # also kills workflow_dispatch, so you can't manually recover without
+      # re-enabling first). A daily commit means that never triggers.
+      #
+      # NOTE: git history is permanent. Trimming history_*.json to 30 days
+      # removes old snapshots from the working tree but they remain recoverable
+      # via git log. See ToU §9 in the research notes. To make the window
+      # genuinely rolling, see the shallow-history note below.
       - name: Commit history
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public/history
+          git add public/history public/snapshots
           if git diff --staged --quiet; then
             echo "No change — nothing to commit."
           else
