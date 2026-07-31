@@ -71,7 +71,7 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public/history public/snapshots
+          git add public/thresholds.json public/history public/snapshots
           if git diff --staged --quiet; then
             echo "No change — nothing to commit."
           else
