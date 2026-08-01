@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Daily build job: fetch MoE thresholds from the Wargaming API and emit a single static JSON file for the WoT mod to consume.
+Daily build job: fetch MoE thresholds from the Wargaming API and emit a single
+static JSON file for the WoT mod to consume.
 
-Reads WG_APPLICATION_ID from the environment. Never hardcode the key — this script is meant to run in CI (GitHub Actions secret, etc.) and the key must not ship inside the mod.
+Reads WG_APPLICATION_ID from the environment. Never hardcode the key — this
+script is meant to run in CI (GitHub Actions secret, etc.) and the key must not
+ship inside the mod.
 
 Usage:
     export WG_APPLICATION_ID=...
@@ -155,15 +158,19 @@ def update_history(path, date, updated_at, distribution, keep_days):
             hist = json.load(f)
         dates = hist["dates"]
         stamps = hist.get("updated_at", [None] * len(dates))
+        # Provenance, if backfill_history.py has been run. "wg" for entries this
+        # script wrote, "poliroid" for backfilled ones. Preserved across runs.
+        sources = hist.get("sources", ["wg"] * len(dates))
         series = {t: {p: decode_series(a) for p, a in m.items()}
                   for t, m in hist["thresholds"].items()}
     except (FileNotFoundError, KeyError, json.JSONDecodeError):
-        dates, stamps, series = [], [], {}
+        dates, stamps, sources, series = [], [], [], {}
 
     if dates and dates[-1] == date:
         # Same UTC day: drop the previous entry, re-append below.
         dates.pop()
         stamps.pop()
+        sources.pop()
         for m in series.values():
             for a in m.values():
                 if a:
@@ -171,6 +178,7 @@ def update_history(path, date, updated_at, distribution, keep_days):
 
     dates.append(date)
     stamps.append(updated_at)
+    sources.append("wg")
     n = len(dates)
 
     for tid, marks in distribution.items():
@@ -195,6 +203,7 @@ def update_history(path, date, updated_at, distribution, keep_days):
     if len(keep) != n:
         dates = [dates[i] for i in keep]
         stamps = [stamps[i] for i in keep]
+        sources = [sources[i] for i in keep]
         for rec in series.values():
             for p in rec:
                 rec[p] = [rec[p][i] for i in keep]
@@ -208,6 +217,7 @@ def update_history(path, date, updated_at, distribution, keep_days):
         "generated_at": int(time.time()),
         "dates": dates,
         "updated_at": stamps,
+        "sources": sources,
         "thresholds": {t: {p: encode_series(a) for p, a in m.items()}
                        for t, m in series.items()},
     }
