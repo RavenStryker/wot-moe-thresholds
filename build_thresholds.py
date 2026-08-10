@@ -40,7 +40,7 @@ import urllib.request
 REALMS = {"na": "com", "eu": "eu"}
 
 # 65 = 1st mark, 85 = 2nd, 95 = 3rd. Max 10 percentiles per request.
-PERCENTILES = "65,85,95"
+PERCENTILES = "65,85,95,100"
 
 API_TIMEOUT = 30
 RETRIES = 3
