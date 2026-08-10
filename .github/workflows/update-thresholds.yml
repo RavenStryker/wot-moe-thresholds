@@ -50,7 +50,7 @@ jobs:
               if n < 500:
                   sys.exit(f"FAIL: {realm} returned only {n} vehicles")
               t34 = block["thresholds"].get("1")
-              if not t34 or not all(k in t34 for k in ("65", "85", "95")):
+              if not t34 or not all(k in t34 for k in ("65", "85", "95", "100")):
                   sys.exit(f"FAIL: {realm} missing expected percentiles on tank_id=1")
           print("sanity check passed")
           EOF
